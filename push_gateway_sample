@@ -1,0 +1,132 @@
+# measure manager
+from prometheus_client import CollectorRegistry, Gauge, pushadd_to_gateway
+
+class DummyMeasureManager:
+    """
+    A context manager for taking measurements from a source object
+
+        with MeasureManager(source, [sink_a, sink_b]) as m:
+            do something
+
+    Internally a configuration manager is implement as self.data.
+    This allows for additional key value pairs to be set within
+    the context:
+
+        with MeasureManager(source, [sink_a, sink_b]) as m:
+            m.data.set('some_job_id', 'job_id')
+            do something
+
+    OR prior to entering:
+
+        measure = MeasureManager(source, [sink_a, sink_b])
+        measure.data.set('some_job_id', 'job_id')
+
+        with measure as m:
+            do something
+
+    For convenience the class name for the source and sinks are added to
+    the configuration manager.
+
+    :param source: a object which provides 3 methods:
+                    - start: begin measurement
+                    - finish: end measurement
+                    - report: return measurement
+    :param sinks: a list of sink objects. Each sink provides a 'push' method to
+                  send a measurement to a sink. The push method should accept a
+                  dict of key value pairs.
+    """
+    def __init__(self, source, sinks, aggregate_report=True):
+        payload = {'source': source.__class__.__name__,
+                   'sinks': [s.__class__.__name__ for s in sinks]}
+        self.data = {}
+        self.source = source
+        self.sinks = sinks
+        self.aggregate = aggregate_report
+
+    def __enter__(self):
+        self.source.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.source.finish()
+        if self.aggregate and self.aggregate is True:
+            stats = self.source.aggregate_report()
+        else:
+            stats = self.source.report()
+        for stat in stats:
+            data = {}
+            data.update(self.data)
+            data.update(stat)
+            for sink in self.sinks:
+                sink.push(data)
+
+    def my_app(environ,start_fn):
+        if environ['PATH_INFO'] == '/metrics':
+            return metrics_app(environ, start_fn)
+
+# sources
+
+import datetime
+class DummySparkMetricsSource(object):
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def start(self, *args, **kwargs):
+        self.start = datetime.datetime.now()
+
+    def finish(self, *args, **kwargs):
+        """
+        Stop measuring
+        """
+        self.end = datetime.datetime.now()
+
+
+    def aggregate_report(self):
+        return [{'duration': self.end-self.start}]
+
+    def report(self):
+        return [{'duration': self.end-self.start}]
+
+
+# sinks
+
+import json
+class PrometheusSink:
+    def push(self, payload):
+        print(payload)
+
+
+class StandardOutputSink:
+    def push(self, payload):
+        try:
+            str_ = json.dumps(payload, indent=3)
+        except:
+            str_ = payload
+        print(str_)
+
+
+
+if __name__ == '__main__':
+
+    import time
+
+    registry = CollectorRegistry()
+    duration = Gauge('mybatchjob_duration_seconds', 'Duration of batch job', registry=registry)
+
+    try:
+        with duration.time():
+
+            source = DummySparkMetricsSource()
+            sinks = [StandardOutputSink()]
+            measure = DummyMeasureManager(source, sinks)
+            with measure as m:
+                time.sleep(4)
+            pass
+    except: pass
+    else:
+            last_success = Gauge('mybatchjob_last_success','UnixTime my batchjob last succeeded', registry=registry)
+            last_success.set_to_current_time()
+    finally:
+
+            pushadd_to_gateway('localhost:9091', job='my_batch_job', registry=registry)
